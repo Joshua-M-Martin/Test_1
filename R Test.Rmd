@@ -1,0 +1,359 @@
+---
+title: "Test_1"
+output: html_document
+---
+
+```{r, echo = FALSE}
+suppressPackageStartupMessages(library(psych))
+library(tidyverse)
+library(haven)
+library(magrittr)
+library(MASS)
+library(vcd)
+library(caret)
+library(tidyr)
+```
+
+First we import the data files into our R session. Given that they are .sav files we can use the read_spss function from the haven package.
+```{r}
+delinquency.dat <- read_spss("Cambridge_delinquency.sav")
+convict.dat <- read_spss("conviction_data.sav")
+```
+
+An initial look at the data-sets shows that the delinquency data comprises 870 variables, with 411 observations, each observation corresponding to an individual (suppressed large output due to space). Variables are not appropriately named; once we identify a set of predictors of interest we will rename them to give them meaning. In the conviction data-set, we find 3 variables allocating the identity number, age and whether or not the person was convicted of a crime. 
+
+
+A brief look through the convict.dat data-set shows the convictions of the boys at different stages of life. Information for 411 are given at 7 different time points, totalling the 2877 observations. We will need to convert this to a wide format in order to join it the delinquency data above.
+
+```{r}
+summary(convict.dat)
+```
+
+Selection of Variables: 
+
+For the present project, I wish to investigate what the potential behavioural risk factors are for pre-adolescent boys. I will choose to focus on the early predictors of boys between the ages of 8-12, since I am interested in seeing how well we can predict later criminality based on data collected at such a young age. Pre-adolescents have not even begun to develop their identities as individuals and thus by evaluating early risk factors for criminality, we can aim to implement intervention programmes at a critical period in the child's life in the hope that we may be able prevent a life of crime 
+
+In accordance with the overall aim set out above, I will investigate how behavioural tendencies can be indicative of later criminal offenders in a pre-adolescent group from England. Variables will be largely drawn from the 10-11 age group, but also from the 8-9 age group. Where possible, when two measures were taken in both the 8-9 and 10-11 age group, we use the "combined" variables, which represent the average of those two scores across the groups.
+
+Variables of interest
+
+Historical/Background Variables
+
+Family history of criminality:
+300 CRIMINAL RECORD OF PARENTS
+301 DELINQUENT OLDER SIBLINGS
+
+Socio-economic status:
+92 INCOME OF FAMILY
+
+Family factors:
+69 FAMILY SIZE
+134 BROKEN HOME BEFORE AGE 10
+
+Parenting style:
+123 PHYSICAL NEGLECT OF BOY
+180 AUTHORITARIANISM OF PARENTS COMBINED
+
+Behavioural and School Measures
+
+Behavioural characteristics:
+108 OBEDIENCE OF BOY
+195 DARING OF BOY COMBINED
+237 NERVOUSNESS OF BOY COMBINED
+277 TROUBLESOMENESS OF BOY COMBINED
+279 TEACHER RATING: COMBINED
+
+Intelligence and School perforamnce
+310 JUNIOR SCHOOL LEAVING RESULTS
+254 PROGRESSIVE MATRICES IQ COMBINED
+283 VERBAL IQ COMBINED
+
+First we exclude variables and only include the 15 variables that we are interested in modelling and give the variables meaningful names using the pipe command and dplyr package.
+
+```{r}
+delinqreduced <- delinquency.dat %>%
+  dplyr::select(v300, v301, v92, v69, v134, v123, v180, v108, v195, v237, v277, v279, v310, v254, v283) %>% #selects variables
+  rename(crimrec_parents = v300, delinq_siblings = v301, family_income = v92, family_size = v69, broken_home = v134, physical_neglect = v123, authoratarianism_style = v180 , obedience_boy = v108, daringness_boy = v195, nervousness_boy =  v237, troublesomeness = v277, teacher_rating_naughty = v279, school_results = v310, nonverbal_IQ = v254, verbal_IQ = v283) #renames each variable
+```
+
+To see whether we successfully selected and renamed varibles of interest, we use the str command to have a look through the variables to see if they correspond to labels. I see that they do; I have chosen to suppress this input as it is unnecessary and will take up space. 
+
+Joining the two data-sets
+
+We need to get a matching variable in order to join the two data-sets we have. Since the row-numbers correspond to the participants 1-411, we can use the add_rownames command in dplyr to create our matching variable.
+
+```{r}
+delinqreduced <- add_rownames(delinqreduced, "icpsr_seq_id_number")
+```
+
+Next, we will transform the conviction data into wide, suitable for joining, and then we will merge the two data-sets into one.
+```{r}
+wideconvict.dat <- convict.dat %>%
+  spread(key = agecat, value = convicted) #create a wide version of conviction data, such that we have 411 rows.
+
+wideconvict.dat$icpsr_seq_id_number <- as.character(wideconvict.dat$icpsr_seq_id_number) #change to character vector suitable for join
+
+crime.dat <- left_join(delinqreduced, wideconvict.dat, by = "icpsr_seq_id_number") #create new composite data-set
+
+crime.dat %<>% drop_na() #drop cases with NA values for appropriate lda analysis. Since we have a sufficiently large sample, I will drop these listwise.
+```
+
+Now that we have suitable set-up our data, we can now move forward and explore it.
+
+Question 2: Exploring the data-set
+
+Before conducting an exploration, I first would like to convert the 1's and 2's for conviction data into 0's and 1's for ease of use. I use a simple for loop to do this by minusing one from each of the conviction columns.
+
+```{r}
+for (i in 17:23) { #shuffle through conviction columns
+  crime.dat[,i] <- crime.dat[,i] - 1  #take off 1 for each value, i.e. 2 -> 1 and 1 -> 0
+}
+```
+
+Now that we have our columns suitable set-up in terms of 0's and 1's, we can conduct an inital exploration. In our data-set we are providede with information about convictions at various ages, as well as grouped as either a juvenile (10 - 16) or an adult (17 - 24); however, we are not provided with an overall measure of whether the person was convicted at all (i.e. either at juvenile or adult), or not at all. Given that we have 0's and 1's, we can easily create such a variable by evaluating whether the juvenile and adult conviction columns sum to more than 0 (i.e. 1 in either column indicates a conviction) This will be the statistic we use in order to explore the data-set.
+
+```{r}
+crime.dat$convicted <- as.numeric((crime.dat$convicted_as_juvenile + crime.dat$convicted_as_adult) > 0)
+```
+
+We next convert the atomic vectors of our data-frame into a format suitable for models. We do this by unlisting them and convertin them to numeric values.
+```{r}
+for (i in 1:16) {
+  crime.dat[,i] <- as.numeric(unlist(crime.dat[,i]))
+}
+```
+
+We will initially explore the variables that we apriori hypothesise to be associated with later criminality in pre-adolescents.
+
+Second we look at the relationship between having been convicted and one's family income. Family income here is measured on a three-point scale: 1. comfortable 2. adequate 3. inadequate. The mosaic plot below suggests there might be a relationship present whereby children from families from less adequate income brackets are more likely to be convicted of crimes later in life (shown by greater proportions in 1 as income inadequacy increases. In terms o  
+
+```{r, fig.width = 3}
+Family_Income <- table(crime.dat$family_income, crime.dat$convicted)
+Broken_Home <- table(crime.dat$broken_home, crime.dat$convicted)
+mosaicplot(Family_Income, color = "blue")
+mosaicplot(Broken_Home, color = "green")
+```
+
+Family History of Criminality
+
+Next we explore whether a family history of crime is related to committing crimes. We investigate whether a parental record is related to commiting crimes, as well as sibling delinquency. 
+
+Parental Record
+
+When evaluated, we find quite a strong relationship present, such that the more crimes a child's parents has been convicted of as an adult, the more likely they are to commit a crime and be convicted themselves. Interestingly, it seems that being convicted as a juvenile only seems to be a better indicator of conviction than up to three convictions as an adult. In a similar fashion to parental record we find that a higher proportion of boys with convicted siblings are also more likely to later be convicted themselves (2 signifies the presence of sibling conviction, while 1 is the relative absence).
+
+```{r, fig.width= 3}
+Parent_Record <- table(crime.dat$crimrec_parents, crime.dat$convicted)
+Sibling_Delinquency <- table(crime.dat$delinq_siblings, crime.dat$convicted)
+mosaicplot(Parent_Record, color = "red")
+mosaicplot(Sibling_Delinquency, color = "green")
+```
+
+Parenting (Physical Neglect and Authoritarianism)
+
+Using a mosaic plot to look at physical neglect, we find a higher proportion of boys who were physically neglected to go on to be convictec of crimes, indicated by the relatively larger rectangle in the bottom-right corner compare to the top-left. A more sever authoritarian style also seems to be associated with a higher probability of convictions.
+
+```{r, fig.width= 3}
+Physical_Neglect <- table(crime.dat$physical_neglect, crime.dat$convicted)
+Authoritarianism <- table(crime.dat$authoratarianism_style, crime.dat$convicted)
+mosaicplot(Physical_Neglect, color = "orange")
+mosaicplot(Authoritarianism, color = "brown")
+```
+
+Family Factors
+
+For other familial factors, we look family size, since this one a main finding found in the Krohn (2006) review of key findings. As in the report, we find that a larger family tends to be associated with more convictions. 
+
+```{r, fig.width= 3}
+Family_Size <- table(crime.dat$family_size, crime.dat$convicted)
+Broken_Home <- table(crime.dat$broken_home, crime.dat$convicted)
+mosaicplot(Family_Size, color = "purple")
+mosaicplot(Broken_Home, color = "blue")
+```
+
+Behavioural Measures
+
+Next we explore the behavioural measures present. As would be expected, more extreme measures of "troublesomeness" are indicative of later convictions, shown by greater proportions of being convicted at a later age. A similar trend can be found for teachers ratings of naughtiness and daringness, whereby more daring and naughty boys in pre-adolescence are more likely to be convicted later in life. On the other hand, measures of obedience and nervousness do not appear to be related to convictions as proportions are roughly equal along the scales. While we can see that there may be some behavioural measures that are predictive of later convictions, we need to keep in mind that we are interested in whether these measures go above and beyond one's familial background situation; such a proposition is not possible from merely exploring the data as I have done here.
+
+```{r, fig.width = 3}
+Troublesomeness <- table(crime.dat$troublesomeness, crime.dat$convicted)
+Obedience <- table(crime.dat$obedience_boy, crime.dat$convicted)
+Daringness <- table(crime.dat$daringness_boy, crime.dat$convicted)
+Nervousness <- table(crime.dat$nervousness_boy, crime.dat$convicted)
+Teacher_Rating_Naughty <- table(crime.dat$teacher_rating_naughty, crime.dat$convicted)
+mosaicplot(Troublesomeness, color = "red")
+mosaicplot(Obedience, color = "brown")
+mosaicplot(Daringness, color = "green")
+mosaicplot(Nervousness, color = "pink")
+mosaicplot(Teacher_Rating_Naughty, color = "blue")
+```
+
+Intelligence and School Performance
+
+Finally we have a look at the relationship between measures of intelligence (verbal and non-verbal IQ) and general shcool performance (grades) on convictions. From all mosaic plots below there does seem to be a slight relationshp present whereby children with more general intelligence (be it verbal or non-verbal) and who get better marks tend to be less likley to be convicted later in life. Once again we should bear in mind that these measures might well be related to one's familial background and thus it is not clear whether these variables will add in more explanatory power to a model containing variables related to one's background.
+
+```{r, fig.size = 5}
+Verbal_IQ <- table(crime.dat$verbal_IQ, crime.dat$convicted)
+Non_Verbal_IQ <- table(crime.dat$nonverbal_IQ, crime.dat$convicted)
+School_Results <- table(crime.dat$school_results, crime.dat$convicted)
+mosaicplot(Verbal_IQ, color = "black")
+mosaicplot(Non_Verbal_IQ, color = "white")
+mosaicplot(School_Results, color = "grey")
+```
+
+Question 3
+
+We now move on to the hypothesis testing phase of our analysis. To recap, we are interested in evaluating whether school-related behaviour and performance can add any explanatory power beyond one's family background in predicting whether someone will be convicted of a crime later in life. Given that we are interested in answering apriori hypotheses related to our data-set, I will use a hierarchical model in order to specify the variables of interest in respective model comparison. Given that we converted convictions into a binary variable (0 - not convicted, 1 - convicted), we will need to model a binomial outcome.
+
+Linear Discriminant Analysis
+
+We first wish to establish a predictive model of conviction based on one's family background. To do this, we enter all of the predictive variables of interest related to socio-economic background, family history of criminality, parenting style and other familial factors into our linear discriminant analysis model and develop the model predictions on our training data. We then evaluate the success of our model by using our model to predict the classification of the test data set. The success of the model can be evaluated through using a confusion matrix and inspecting measures of predicted vs. observed. 
+
+```{r}
+convicted_lda1 <- lda(convicted ~ crimrec_parents + delinq_siblings + family_income + family_size + broken_home + physical_neglect + authoratarianism_style, data = crime.dat)
+
+convicted_lda1
+```
+
+The lda provided us with one function for discrimination. A look at the prior probabilities shows that there is a larger proportion of people who were not convicted later on in life compared to those who were convicted (69% vs. 31%). The coefficients suggest that family history of criminality from parents and siblings, coming from a broken home and physical neglect as the strongest predictors of classificatoin Tos see whether or not the discriminant analysis was a success or not, we can calculate the predicted values and use a confusion matrix to compare the model's predicted classification to our observed values. The general classification found that 170 out of 183 boys were correctly classified as not being convicted (specificity = 92.89%), while only 21 out of 81 boys were correctly classified as being convicted later on in life (25.92%). While the accuracy of 72.35% appears on the surface to be a fairly good classification, we need to remember that there are prior differences in the distribution of our sample (69% to 31%), thus a simple algorhythm that simply predicted 0 for each boy would obtain roughly 70% accuracy. Thus, it is important to interpret the balanced accuracy output, which is 59.41%. To check whether the overall model is significant, we use the manova command and wilk test. We find that the overall model is significant Wilks(6) = 0.85634, p < .001. Despite the significance, our overall model did very poorly in predicting boys that would go on to be convicted of a crime. As such, it appears that our chosen family background factors do not seem to be very good predictors of boys who will be convicted later in life.
+
+```{r}
+predlda1 <- suppressWarnings(predict(convicted_lda1, crime.dat))
+confusionMatrix(as.factor(predlda1$class), as.factor(crime.dat$convicted), positive = "1")
+```
+
+```{r}
+convictselect <- crime.dat %>% #only select variables of interest
+  dplyr::select(crimrec_parents, delinq_siblings, family_income, family_size, broken_home, physical_neglect, authoratarianism_style)
+convictselect <- as.matrix(convictselect) #convert to matrix
+
+summary(manova(convictselect ~ crime.dat$convicted), test = "Wilks") #Wilk test of significance.
+```
+
+Adding behavioural variables to model
+
+Next we evaluate whether using behavioural variables of interest from school can improve our previous model in predicting convictions. We once again construct an lda model based on family background and this time add variables related to the boys' behaviour at school. Once again we obtain one linear discriminant function. The previous variables of family history of crime, physical neglect and coming from a broken home still appear to be important in the discrimination function, now joined by the behavioural variables troublesomeness and nervousness as the predictors with highest coefficients. We once again evaluate the model success via a confusion matrix. After adding these variables we find a balanced accuracy of 70.18%, which is higher than our initial model. Specificity is almost the same as our previous model (93.44%), but importantly our sensitivity showed a substantial increase from 25.92% to 46.91%, where 38 out of the 81 boys were now correctly classified. Investigation of significance found the overall model to be significant Wilk's(12) = 0.76191, p < .001. While we were only able to roughly classify half of the later convictors, this is a substantial increase from our baseline model. As a result, it appearst that behavioural variables in pre-adolscence can supplement background variables in predicting boys that will be convicted of crimes later in life.
+
+```{r}
+convicted_lda2 <- lda(convicted ~ crimrec_parents + delinq_siblings + family_income + family_size + broken_home + physical_neglect + authoratarianism_style + obedience_boy + daringness_boy + nervousness_boy + troublesomeness + teacher_rating_naughty, data = crime.dat)
+convicted_lda2
+```
+
+```{r}
+suppressWarnings(predlda2 <- predict(convicted_lda2, newdata = crime.dat))
+confusionMatrix(as.factor(predlda2$class), as.factor(crime.dat$convicted), positive = "1")
+```
+```{r}
+convictselect <- crime.dat %>% #only select variables of interest
+  dplyr::select(crimrec_parents, delinq_siblings, family_income, family_size, broken_home, physical_neglect, authoratarianism_style, obedience_boy, daringness_boy, nervousness_boy, troublesomeness, teacher_rating_naughty)
+convictselect <- as.matrix(convictselect) #convert to matrix
+
+summary(manova(convictselect ~ crime.dat$convicted), test = "Wilks") #Wilk test of significance.
+```
+
+Adding measures of intelligence and academic performance
+
+Finally, we test whether measures of intelligence (as assessed by verbal and non-verbal IQ) and school leaving results in pre-adolescence could improve upon the familial background model in predicting convictions. One linear discriminant function was found. The previous variables of family history of crime, physical neglect and coming from a broken home still appear to be important in the discrimination function. However, the coefficients of the variables related to pre-adolescent intelligence and school performance are low and thus it is unlikley that they are adding anything to the model. This is corroborated by the confusion matrix where the balanced accuracy was found to be 60.37%, with only marginal increases in specificity (93.35%) and sensitivity (28.39%). While the model is significant, it's performance in predicting convictors is still poor and does not seem to improve on the previous model containing variables related to family background.
+
+```{r}
+convicted_lda3 <- lda(convicted ~ crimrec_parents + delinq_siblings + family_income + family_size + broken_home + physical_neglect + authoratarianism_style + verbal_IQ + nonverbal_IQ + school_results, data = crime.dat)
+convicted_lda3
+```
+```{r}
+predlda3 <- suppressWarnings(predict(convicted_lda3, newdata = crime.dat))
+confusionMatrix(as.factor(predlda3$class), as.factor(crime.dat$convicted), positive = "1")
+```
+```{r}
+convictselect <- crime.dat %>% #only select variables of interest
+  dplyr::select(crimrec_parents, delinq_siblings, family_income, family_size, broken_home, physical_neglect, authoratarianism_style, obedience_boy, daringness_boy, nervousness_boy, troublesomeness, teacher_rating_naughty, verbal_IQ, nonverbal_IQ, school_results)
+convictselect <- as.matrix(convictselect) #convert to matrix
+
+summary(manova(convictselect ~ crime.dat$convicted), test = "Wilks") #Wilk test of significance.
+```
+
+Supplementary Hypothesis
+
+Given the unexpected poor performance of our baseline model containing background variables in predicting convictions, we chose to investigate whether a model just containing behavioural variables could out-peform a model containing family background variables. The model found one discriminant function with all behavioural variables except the teacher's rating as possible important predictors. The confusion matrix output shows the balanced accuracy to be 61.62%, with specificity 87.43% and sensitivity 35.80%, which shows that the model does substantially better than the initial family background model in predicting boys who will go on to be convicted. The overall model was also significant (p <. 001). This shows that behavioural variables at school may be more informative in predicting convictions than using variables related to one's family background. However, given that our composite model found a classification sensitivity of close to 50%, family background information can help complement these behavioural variables in this predition. As a result, for our final model we choose to maintain a composite model as opposed to just a model containing behavioural variables.
+
+```{r}
+convicted_lda4 <- lda(convicted ~ obedience_boy + daringness_boy + nervousness_boy + troublesomeness + teacher_rating_naughty, data = crime.dat)
+convicted_lda4
+```
+```{r}
+predlda4 <- suppressWarnings(predict(convicted_lda4))
+confusionMatrix(as.factor(predlda4$class), as.factor(crime.dat$convicted), positive = "1")
+```
+```{r}
+convictselect <- crime.dat %>% #only select variables of interest
+  dplyr::select(obedience_boy, daringness_boy, nervousness_boy, troublesomeness, teacher_rating_naughty, verbal_IQ, nonverbal_IQ, school_results)
+convictselect <- as.matrix(convictselect) #convert to matrix
+
+summary(manova(convictselect ~ crime.dat$convicted), test = "Wilks") #Wilk test of significance.
+```
+
+Simplifying our final model
+
+We next checked whether we could simplify our model through removing variables with low coefficients and evaulating whether or not they add anything substantial to the model. We decide to remove those variables with a coefficient of less than < 0.2, which are family size, family income, authoritarian style and teachers ratings of naughtiness. The overall model is still significant (p < .001). Only a marginal decrease is observed in sensitivity to 41.98%, indicating that we may be able to leave these variables out. In order to see which model is more generalisable and whether we can opt for a more simpler one, we will conduct a leave one out cross-validation for these models.
+
+```{r}
+convicted_lda5 <- lda(convicted ~ crimrec_parents + delinq_siblings + broken_home + physical_neglect + obedience_boy + daringness_boy + nervousness_boy + troublesomeness, data = crime.dat)
+convicted_lda5
+```
+```{r}
+predlda5 <- suppressWarnings(predict(convicted_lda5))
+confusionMatrix(as.factor(predlda5$class), as.factor(crime.dat$convicted), positive = "1")
+```
+```{r}
+convictselect <- crime.dat %>% #only select variables of interest
+  dplyr::select(crimrec_parents, delinq_siblings, broken_home, physical_neglect, obedience_boy, daringness_boy, nervousness_boy, troublesomeness, verbal_IQ, nonverbal_IQ, school_results)
+convictselect <- as.matrix(convictselect) #convert to matrix
+
+summary(manova(convictselect ~ crime.dat$convicted), test = "Wilks") #Wilk test of significance.
+```
+
+Creating a function to assess predictive accuracy of our model.
+
+Next we assess the generalisability of our previously constructed model through using leave one out cross-validation. We construct a function below to extract the balanced accuracy, specificity and sensitivity of both our original and cross-validated models.
+
+```{r}
+predictiveaccuracy = function(model,cvmodel,data) { 
+#function receives three inputs: one refers to the lda model, the second refers to the cross-validated model and the third refers to the data-set to which the predicted model will be applied. 
+suppressWarnings(p1 <- predict(model))
+#predicted values from model are calculated for non-cv model.
+c1 <- confusionMatrix(as.factor(p1$class), as.factor(data$convicted), positive = "1")
+c2 <- confusionMatrix(as.factor(cvmodel$class), as.factor(data$convicted), positive = "1")
+#constructs a confusion matrix in order to get values of model accuracy
+print("Original")
+print(c1$byClass[1])
+print(c1$byClass[2])
+print(c1$byClass[11])
+print("Cross-validated")
+print(c2$byClass[1])
+print(c2$byClass[2])
+print(c2$byClass[11])
+#fetches respective values for user. User now compares the original measures of accuracy to the cross-validated one.
+}
+```
+
+Next we test out our function on the models we obtained. We now construct cross-validated models and specify them together with the original models in the data-set. Our function returns the sensitivity, specificity and balanced accuracy for both our original and cross-validated models. As can be seen below when we compare the original and cross-validated models to one another, the more complex model appears to better predict the convictions better on the original data-set for which the model was built. But when cross-validation is conducted, the model accuracy is almost identical (sensitivity the same, 40.74% and in fact specificity is better for the simpler model, 91.8% vs. 89.62%). This is reflected by a more substantial decrease in accuracy for the complete model when cross-validation is performed, while the simpler model generalises well and only a marginal decrease in sensitivity and overall balanced accuracy is observed. This may be due to overfitting from the complete model, where variables included in the model that add little explanatory power and do not generalise well to other samples. Due to these, findings we choose the simpler model containing 
+(crimrec_parents + delinq_siblings + broken_home + physical_neglect + obedience_boy + daringness_boy + nervousness_boy + troublesomeness) as our final model. 
+
+Assessing complete model.
+```{r}
+convicted_lda2cv <- lda(convicted ~ crimrec_parents + delinq_siblings + family_income + family_size + broken_home + physical_neglect + authoratarianism_style + obedience_boy + daringness_boy + nervousness_boy + troublesomeness + teacher_rating_naughty, data = crime.dat, CV = TRUE, na.action = na.omit)
+
+predictiveaccuracy(convicted_lda2,convicted_lda2cv,crime.dat)
+```
+
+Assessing simpler model.
+```{r}
+convicted_lda5cv <- lda(convicted ~ crimrec_parents + delinq_siblings + broken_home + physical_neglect + obedience_boy + daringness_boy + nervousness_boy + troublesomeness, data = crime.dat, CV = TRUE, na.action = na.omit)
+
+predictiveaccuracy(convicted_lda5,convicted_lda5cv,crime.dat)
+```
+
+Conclusion 
+
+Here we tried to construct a predictive model of convictions based on variables that are found in pre-adolescence, including family background, behavioural variables and intellegence. We found that an optimal model contained certain variables related to family background, such as a family history of criminality (both parents and siblings), coming from a broken home and physical neglect, as well as behavioural variables related nervousness, obedience, troublesomeness and daringness. Interestingly, variables related to one's background such as family income, family size and an authoratative parenting style did not seem to add any explanatory power over and above these variables. Similarly, teahchers ratings of naughtiness and one's academic intellect did not seem to be informative over and above the previously mentioned variables. Overall, our cross-validated model could correctly classify roughly 40% of boys who would go on to be convicted later in life, and correctly classify around 90% of boys who would not go on to commit crime. While being able to predict only 40% of convictions may not seem substantial, we must remember that this model is based entirely on variables available in preadolescence. As such, there is bound to be a lot of unexplained variance from other factors that determine whether one commits crimes and is convicted later in life. A limitation of this model is that we grouped juvenile and adult convictions together; it is not clear from our analyses whether these would be any different and whether different variables would be similarly predictive for both categories. 
+
+
